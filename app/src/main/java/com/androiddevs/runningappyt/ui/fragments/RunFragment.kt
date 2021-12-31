@@ -29,7 +29,7 @@ class RunFragment:Fragment(R.layout.fragment_run),EasyPermissions.PermissionCall
 
     private fun requestpermissions()
     {
-        if(TrackingUtility.hasloactionpermissions(requireContext()))
+        if(TrackingUtility.hasLocationPermissions(requireContext()))
         {
             return
         }
