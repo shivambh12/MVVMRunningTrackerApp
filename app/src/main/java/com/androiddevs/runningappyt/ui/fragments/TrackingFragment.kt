@@ -3,12 +3,14 @@ package com.androiddevs.runningappyt.ui.fragments
 import android.content.Intent
 import android.os.Bundle
 import android.util.Log
-import android.view.View
+import android.view.*
 import android.widget.Toast
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.viewModels
 import androidx.lifecycle.Observer
+import androidx.navigation.fragment.findNavController
 import com.androiddevs.runningappyt.R
+import com.androiddevs.runningappyt.db.Run
 import com.androiddevs.runningappyt.other.Constants.ACTION_PAUSE_SERVICE
 import com.androiddevs.runningappyt.other.Constants.ACTION_START_OR_RESUME_SERVICE
 import com.androiddevs.runningappyt.other.Constants.ACTION_STOP_SERVICE
@@ -21,10 +23,18 @@ import com.androiddevs.runningappyt.services.TrackingService
 import com.androiddevs.runningappyt.ui.viewmodels.MainViewModel
 import com.google.android.gms.maps.CameraUpdateFactory
 import com.google.android.gms.maps.GoogleMap
+import com.google.android.gms.maps.model.LatLngBounds
 import com.google.android.gms.maps.model.PolylineOptions
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
+import com.google.android.material.snackbar.Snackbar
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.android.synthetic.main.fragment_tracking.*
 import timber.log.Timber
+import java.util.*
+import javax.inject.Inject
+import kotlin.math.round
+
+const val CANCEL_TRACKING_DIALOG_TAG = "CancelDialog"
 
 @AndroidEntryPoint
 class TrackingFragment:Fragment(R.layout.fragment_tracking) {
@@ -36,12 +46,36 @@ class TrackingFragment:Fragment(R.layout.fragment_tracking) {
     private var map: GoogleMap? = null
 
     private var curTimeInMillis = 0L
+    private var menu: Menu?=null
+
+    @set:Inject
+    var weight = 80f
+    override fun onCreateView(
+        inflater: LayoutInflater,
+        container: ViewGroup?,
+        savedInstanceState: Bundle?
+    ): View? {
+        setHasOptionsMenu(true)
+        return super.onCreateView(inflater, container, savedInstanceState)
+    }
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
         mapView.onCreate(savedInstanceState)
         btnToggleRun.setOnClickListener {
             toggleRun()
+        }
+        if(savedInstanceState!=null)
+        {
+            val cancelTrackingDialog=parentFragmentManager.findFragmentByTag(
+                CANCEL_TRACKING_DIALOG_TAG) as CancelTrackingDialog?
+            cancelTrackingDialog?.setYesListner {
+                stopRun()
+            }
+        }
+        btnFinishRun.setOnClickListener {
+            zoomToSeeWholeTrack()
+            endRunAndSaveToDb()
         }
         mapView.getMapAsync {
             map = it
@@ -71,19 +105,60 @@ class TrackingFragment:Fragment(R.layout.fragment_tracking) {
 
     private fun toggleRun() {
         if(isTracking) {
+            menu?.getItem(0)?.isVisible=true
             sendCommandToService(ACTION_PAUSE_SERVICE)
         } else {
             sendCommandToService(ACTION_START_OR_RESUME_SERVICE)
         }
     }
 
+    override fun onCreateOptionsMenu(menu: Menu, inflater: MenuInflater) {
+        super.onCreateOptionsMenu(menu, inflater)
+        inflater.inflate(R.menu.toolbar_tracking_menu,menu)
+        this.menu=menu
+    }
+
+    override fun onPrepareOptionsMenu(menu: Menu) {
+        super.onPrepareOptionsMenu(menu)
+        if(curTimeInMillis > 0L)
+        {
+            this.menu?.getItem(0)?.isVisible = true
+        }
+    }
+
+    override fun onOptionsItemSelected(item: MenuItem): Boolean {
+        when(item.itemId)
+        {
+            R.id.miCancelTracking-> {
+                showCancelTrackingDialog()
+            }
+        }
+        return super.onOptionsItemSelected(item)
+    }
+
+    private fun showCancelTrackingDialog(){
+        CancelTrackingDialog().apply {
+            setYesListner { stopRun() }
+        }.show(parentFragmentManager,CANCEL_TRACKING_DIALOG_TAG)
+    }
+
+    private fun stopRun() {
+        sendCommandToService(ACTION_STOP_SERVICE)
+        findNavController().navigate(R.id.action_trackingFragment_to_runFragment)
+        btnToggleRun.text = "Start"
+        btnFinishRun.visibility = View.GONE
+        tvTimer.text = "00:00:00:00"
+    }
+
     private fun updateTracking(isTracking: Boolean) {
         this.isTracking = isTracking
-        if(!isTracking) {
+        if(!isTracking && curTimeInMillis > 0L) {
             btnToggleRun.text = "Start"
             btnFinishRun.visibility = View.VISIBLE
-        } else {
+        }
+        else if(isTracking) {
             btnToggleRun.text = "Stop"
+            menu?.getItem(0)?.isVisible=true
             btnFinishRun.visibility = View.GONE
         }
     }
@@ -96,6 +171,47 @@ class TrackingFragment:Fragment(R.layout.fragment_tracking) {
                     MAP_ZOOM
                 )
             )
+        }
+    }
+
+    private fun zoomToSeeWholeTrack()
+    {
+        val bounds = LatLngBounds.Builder()
+        for(polyline in pathPoints)
+        {
+            for(pos in polyline)
+            {
+                bounds.include(pos)
+            }
+        }
+        map?.moveCamera(
+                CameraUpdateFactory.newLatLngBounds(bounds.build(),
+                mapView.width,
+                mapView.height,
+                (mapView.height * 0.05f).toInt()
+            )
+        )
+    }
+
+    private fun endRunAndSaveToDb()
+    {
+        map?.snapshot { bmp ->
+            var distanceInMetres = 0
+            for(polyline in pathPoints)
+            {
+                distanceInMetres+=TrackingUtility.calculatePolylineLength(polyline).toInt()
+            }
+            val avgSpeed = round((distanceInMetres / 1000f) / (curTimeInMillis / 1000f / 60 / 60)*10) / 10f
+            val dateTimestamp = Calendar.getInstance().timeInMillis
+            val caloriesBurned = ((distanceInMetres/1000f)*weight).toInt()
+            val run = Run(bmp,dateTimestamp,avgSpeed,distanceInMetres,curTimeInMillis,caloriesBurned)
+            viewModel.insertRun(run)
+            Snackbar.make(
+                requireActivity().findViewById(R.id.rootView),
+                "Run saved successfully",
+                Snackbar.LENGTH_LONG
+                                ).show()
+            stopRun()
         }
     }
 
